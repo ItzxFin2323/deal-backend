@@ -6,12 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ----- CONFIG -----
-const GOOGLE_PLACES_KEY = process.env.GOOGLE_PLACES_KEY; // set this in Railway
-
-// Haversine distance in miles between two lat/lon points
 function distanceMiles(lat1, lon1, lat2, lon2) {
-  const R = 3958.8; // Earth radius in miles
+  const R = 3958.8;
   const toRad = (deg) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
@@ -24,20 +20,13 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-function buildPhotoUrl(photoRef) {
-  if (!photoRef || !GOOGLE_PLACES_KEY) return null;
-  return `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photoRef}&key=${GOOGLE_PLACES_KEY}`;
-}
-
-// Simple health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Main endpoint used by Creao
 app.get("/deals/nearby", async (req, res) => {
   try {
-    const { lat, lon, radius = 10, category, search } = req.query;
+    const { lat, lon, radius = 20, category } = req.query;
 
     if (!lat || !lon) {
       return res
@@ -45,107 +34,88 @@ app.get("/deals/nearby", async (req, res) => {
         .json({ error: "lat and lon are required query params" });
     }
 
-    if (!GOOGLE_PLACES_KEY) {
-      return res
-        .status(500)
-        .json({ error: "GOOGLE_PLACES_KEY is not set on the server" });
-    }
-
     const userLat = parseFloat(lat);
     const userLon = parseFloat(lon);
-    const radiusMiles = Number(radius) || 10;
-    // Google Places radius is in meters, max 50,000
-    const radiusMeters = Math.min(
-      Math.round(radiusMiles * 1609.34),
-      50000
-    );
+    const radiusMiles = Number(radius) || 20;
+    const radiusMeters = Math.round(radiusMiles * 1609.34);
 
-    // Map your category tabs -> Google Places types
-    let type;
+    let overpassFilter;
     switch ((category || "").toLowerCase()) {
       case "food":
-        type = "restaurant";
-        break;
-      case "groceries":
-        type = "supermarket";
+        overpassFilter =
+          'node(around:RADIUS,USER_LAT,USER_LON)["amenity"~"restaurant|fast_food|cafe|bar|pub"];';
         break;
       case "gas":
-        type = "gas_station";
+        overpassFilter =
+          'node(around:RADIUS,USER_LAT,USER_LON)["amenity"="fuel"];';
+        break;
+      case "groceries":
+        overpassFilter =
+          'node(around:RADIUS,USER_LAT,USER_LON)["shop"~"supermarket|convenience"];';
         break;
       default:
-        type = "store"; // generic store / shop
+        overpassFilter = `
+          node(around:RADIUS,USER_LAT,USER_LON)["shop"];
+          node(around:RADIUS,USER_LAT,USER_LON)["amenity"];
+        `;
         break;
     }
 
-    const params = {
-      location: `${userLat},${userLon}`,
-      radius: radiusMeters,
-      key: GOOGLE_PLACES_KEY,
-      type
-    };
+    let query = `
+      [out:json][timeout:30];
+      (
+        ${overpassFilter}
+      );
+      out center 50;
+    `
+      .replace(/RADIUS/g, radiusMeters.toString())
+      .replace(/USER_LAT/g, userLat.toString())
+      .replace(/USER_LON/g, userLon.toString());
 
-    // Optional text search from your search bar
-    if (search && String(search).trim().length > 0) {
-      params.keyword = String(search).trim();
-    }
+    const overpassUrl = "https://overpass-api.de/api/interpreter";
+    const response = await axios.post(overpassUrl, query, {
+      headers: { "Content-Type": "text/plain" },
+    });
 
-    const placesResp = await axios.get(
-      "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
-      { params }
-    );
+    const elements = response.data.elements || [];
 
-    if (placesResp.data.status !== "OK" && placesResp.data.status !== "ZERO_RESULTS") {
-      console.error("Google Places error:", placesResp.data);
-      return res.status(500).json({
-        error: "Google Places API error",
-        status: placesResp.data.status
-      });
-    }
+    const deals = elements
+      .map((el) => {
+        const tags = el.tags || {};
+        const name = tags.name || "Unknown Place";
 
-    const results = placesResp.data.results || [];
+        const placeLat = el.lat || (el.center && el.center.lat);
+        const placeLon = el.lon || (el.center && el.center.lon);
 
-    const deals = results
-      .map((place) => {
-        const loc = place.geometry && place.geometry.location;
-        if (!loc || loc.lat == null || loc.lng == null) return null;
+        if (placeLat == null || placeLon == null) return null;
 
-        const dist = distanceMiles(userLat, userLon, loc.lat, loc.lng);
-
-        const primaryType = (place.types && place.types[0]) || "local";
-
-        const photoRef =
-          place.photos && place.photos.length > 0
-            ? place.photos[0].photo_reference
-            : null;
+        const miles = distanceMiles(userLat, userLon, placeLat, placeLon);
 
         return {
-          id: place.place_id,
-          storeName: place.name,
-          title: place.name, // you can change this later to a more "deal" title
-          description: place.vicinity || "Local place near you.",
-          distanceMiles: dist,
-          category: primaryType,
-          address: place.vicinity || "",
+          id: String(el.id),
+          storeName: name,
+          title: `Visit ${name}`,
+          description: `Local place near you.`,
+          distanceMiles: miles,
+          category: tags.amenity || tags.shop || "Local",
+          address: tags["addr:street"] || "",
           expiryDate: null,
           promoCode: "",
-          url: `https://www.google.com/maps/place/?q=place_id:${place.place_id}`,
-          latitude: loc.lat,
-          longitude: loc.lng,
+          url: null,
+          latitude: placeLat,
+          longitude: placeLon,
           originalPrice: null,
           discountedPrice: null,
-          imageUrl: buildPhotoUrl(photoRef),
-          rating: place.rating || null,
-          userRatingsTotal: place.user_ratings_total || null
         };
       })
-      .filter((d) => d && typeof d.distanceMiles === "number")
+      .filter(Boolean)
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
       .slice(0, 50);
 
     res.json(deals);
   } catch (err) {
-    console.error("Error in /deals/nearby:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch nearby deals" });
+    console.error("Error /deals/nearby:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to fetch places" });
   }
 });
 
