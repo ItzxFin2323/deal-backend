@@ -6,6 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Distance calc
 function distanceMiles(lat1, lon1, lat2, lon2) {
   const R = 3958.8;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -18,6 +19,42 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
       Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+// Multiple Overpass servers to avoid rate limits
+const OVERPASS_SERVERS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://lz4.overpass-api.de/api/interpreter",
+  "https://z.overpass-api.de/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+];
+
+// Try each server until one works
+async function fetchOverpass(query) {
+  for (const url of OVERPASS_SERVERS) {
+    try {
+      console.log("Trying Overpass server:", url);
+
+      const response = await axios.post(url, query, {
+        headers: { "Content-Type": "text/plain" },
+        timeout: 25000
+      });
+
+      // Some failing servers return HTML instead of JSON → skip them
+      if (typeof response.data === "string" && response.data.includes("<html")) {
+        console.log("Bad response (HTML), skipping:", url);
+        continue;
+      }
+
+      console.log("Using Overpass server:", url);
+      return response.data;
+    } catch (err) {
+      console.log("Overpass failed:", url);
+      continue;
+    }
+  }
+
+  throw new Error("All Overpass servers failed");
 }
 
 app.get("/health", (req, res) => {
@@ -39,20 +76,24 @@ app.get("/deals/nearby", async (req, res) => {
     const radiusMiles = Number(radius) || 20;
     const radiusMeters = Math.round(radiusMiles * 1609.34);
 
+    // Category filters
     let overpassFilter;
     switch ((category || "").toLowerCase()) {
       case "food":
         overpassFilter =
           'node(around:RADIUS,USER_LAT,USER_LON)["amenity"~"restaurant|fast_food|cafe|bar|pub"];';
         break;
+
       case "gas":
         overpassFilter =
           'node(around:RADIUS,USER_LAT,USER_LON)["amenity"="fuel"];';
         break;
+
       case "groceries":
         overpassFilter =
           'node(around:RADIUS,USER_LAT,USER_LON)["shop"~"supermarket|convenience"];';
         break;
+
       default:
         overpassFilter = `
           node(around:RADIUS,USER_LAT,USER_LON)["shop"];
@@ -61,33 +102,31 @@ app.get("/deals/nearby", async (req, res) => {
         break;
     }
 
+    // Build Overpass query
     let query = `
       [out:json][timeout:30];
       (
         ${overpassFilter}
       );
-      out center 50;
+      out center 60;
     `
-      .replace(/RADIUS/g, radiusMeters.toString())
-      .replace(/USER_LAT/g, userLat.toString())
-      .replace(/USER_LON/g, userLon.toString());
+      .replace(/RADIUS/g, radiusMeters)
+      .replace(/USER_LAT/g, userLat)
+      .replace(/USER_LON/g, userLon);
 
-    const overpassUrl = "https://overpass-api.de/api/interpreter";
-    const response = await axios.post(overpassUrl, query, {
-      headers: { "Content-Type": "text/plain" },
-    });
+    // Call Overpass (fallback automatically)
+    const data = await fetchOverpass(query);
+    const elements = data.elements || [];
 
-    const elements = response.data.elements || [];
-
+    // Format results
     const deals = elements
       .map((el) => {
         const tags = el.tags || {};
-        const name = tags.name || "Unknown Place";
+        const name = tags.name || "Local Place";
 
         const placeLat = el.lat || (el.center && el.center.lat);
         const placeLon = el.lon || (el.center && el.center.lon);
-
-        if (placeLat == null || placeLon == null) return null;
+        if (!placeLat || !placeLon) return null;
 
         const miles = distanceMiles(userLat, userLon, placeLat, placeLon);
 
@@ -105,7 +144,7 @@ app.get("/deals/nearby", async (req, res) => {
           latitude: placeLat,
           longitude: placeLon,
           originalPrice: null,
-          discountedPrice: null,
+          discountedPrice: null
         };
       })
       .filter(Boolean)
@@ -114,8 +153,8 @@ app.get("/deals/nearby", async (req, res) => {
 
     res.json(deals);
   } catch (err) {
-    console.error("Error /deals/nearby:", err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to fetch places" });
+    console.error("Error in /deals/nearby:", err.message);
+    res.status(500).json({ error: "Failed to fetch nearby places" });
   }
 });
 
