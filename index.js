@@ -22,7 +22,7 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Amenities and shops we consider "good" consumer places
+// consumer-facing amenities & shops
 const GOOD_AMENITIES = new Set([
   "restaurant",
   "fast_food",
@@ -35,23 +35,10 @@ const GOOD_AMENITIES = new Set([
   "fuel",
   "charging_station",
   "pharmacy",
-  "bank",
-  "atm",
   "cinema",
   "theatre",
   "nightclub",
-  "pub",
-  "biergarten",
-  "bbq",
-  "biergarten",
-  "clinic",
-  "doctors",
-  "dentist",
-  "veterinary",
-  "library",
-  "biergarten",
-  "car_wash",
-  "car_rental"
+  "car_wash"
 ]);
 
 const GOOD_SHOPS = new Set([
@@ -81,7 +68,6 @@ const GOOD_SHOPS = new Set([
   "butcher",
   "greengrocer",
   "beverages",
-  "wholesale",
   "gift",
   "books",
   "florist",
@@ -93,10 +79,12 @@ const GOOD_SHOPS = new Set([
   "kiosk",
   "stationery",
   "deli",
-  "seafood"
+  "seafood",
+  "discount",
+  "department_store"
 ]);
 
-// Overpass servers (rotate to avoid rate limits)
+// Overpass servers for fallback
 const OVERPASS_SERVERS = [
   "https://overpass-api.de/api/interpreter",
   "https://lz4.overpass-api.de/api/interpreter",
@@ -125,6 +113,166 @@ async function fetchOverpass(query) {
     }
   }
   throw new Error("All Overpass servers failed");
+}
+
+// -------------------- Deal enrichment --------------------
+
+function enrichWithDeals(place) {
+  const name = (place.storeName || "").toLowerCase();
+  const cat = (place.category || "").toLowerCase();
+
+  let dealTitle = null;
+  let dealSubtitle = null;
+  let dealUrl = null;
+  let dealSource = null; // "brand" or "category"
+
+  // ---- Brand specific deals ----
+  if (name.includes("mcdonald")) {
+    dealTitle = "McDonald's app & deals";
+    dealSubtitle = "Check latest offers and app-only deals.";
+    dealUrl = "https://www.mcdonalds.com/us/en-us/deals.html";
+    dealSource = "brand";
+  } else if (name.includes("burger king")) {
+    dealTitle = "Burger King offers";
+    dealSubtitle = "See current Royal Perks and coupons.";
+    dealUrl = "https://www.bk.com/offers";
+    dealSource = "brand";
+  } else if (name.includes("wendy")) {
+    dealTitle = "Wendy's rewards & deals";
+    dealSubtitle = "View current offers in the Wendy's app.";
+    dealUrl = "https://www.wendys.com/deals";
+    dealSource = "brand";
+  } else if (name.includes("subway")) {
+    dealTitle = "Subway deals";
+    dealSubtitle = "Subs, coupons and app offers.";
+    dealUrl = "https://www.subway.com/en-US/Deals";
+    dealSource = "brand";
+  } else if (name.includes("starbucks")) {
+    dealTitle = "Starbucks rewards offers";
+    dealSubtitle = "Check Star Rewards and featured drinks.";
+    dealUrl = "https://www.starbucks.com/rewards";
+    dealSource = "brand";
+  } else if (name.includes("dunkin")) {
+    dealTitle = "Dunkin' offers";
+    dealSubtitle = "Perks and app coupons.";
+    dealUrl = "https://www.dunkindonuts.com/en/ddperks";
+    dealSource = "brand";
+  } else if (
+    name.includes("walmart")
+  ) {
+    dealTitle = "Walmart Rollbacks & deals";
+    dealSubtitle = "Everyday savings and Rollback prices.";
+    dealUrl = "https://www.walmart.com/deals";
+    dealSource = "brand";
+  } else if (name.includes("target")) {
+    dealTitle = "Target Circle deals";
+    dealSubtitle = "Weekly discounts and Circle offers.";
+    dealUrl = "https://www.target.com/circle/offers";
+    dealSource = "brand";
+  } else if (name.includes("cvs")) {
+    dealTitle = "CVS ExtraCare deals";
+    dealSubtitle = "Pharmacy & weekly ad savings.";
+    dealUrl = "https://www.cvs.com/extracare/home";
+    dealSource = "brand";
+  } else if (name.includes("walgreens")) {
+    dealTitle = "Walgreens weekly ad";
+    dealSubtitle = "Digital coupons and sale prices.";
+    dealUrl = "https://www.walgreens.com/offers/offers.jsp";
+    dealSource = "brand";
+  } else if (name.includes("dollar general")) {
+    dealTitle = "Dollar General digital coupons";
+    dealSubtitle = "Clip and save on weekly deals.";
+    dealUrl = "https://www.dollargeneral.com/coupons.html";
+    dealSource = "brand";
+  } else if (name.includes("costco")) {
+    dealTitle = "Costco savings & offers";
+    dealSubtitle = "See current warehouse deals.";
+    dealUrl = "https://www.costco.com/warehouse-savings.html";
+    dealSource = "brand";
+  } else if (name.includes("aldi")) {
+    dealTitle = "ALDI weekly specials";
+    dealSubtitle = "Store specials and limited-time finds.";
+    dealUrl = "https://www.aldi.us/en/weekly-specials/";
+    dealSource = "brand";
+  } else if (name.includes("home depot")) {
+    dealTitle = "Home Depot savings";
+    dealSubtitle = "Special buys and promotions.";
+    dealUrl = "https://www.homedepot.com/c/Savings_Center";
+    dealSource = "brand";
+  } else if (name.includes("lowe's") || name.includes("lowes")) {
+    dealTitle = "Lowe's deals";
+    dealSubtitle = "Savings and weekly specials.";
+    dealUrl = "https://www.lowes.com/l/deals";
+    dealSource = "brand";
+  }
+
+  // ---- Category fallback deals (if no brand match) ----
+  if (!dealUrl) {
+    if (
+      cat.includes("restaurant") ||
+      cat.includes("cafe") ||
+      cat.includes("bar") ||
+      cat.includes("pub") ||
+      cat.includes("food")
+    ) {
+      dealTitle = "Local restaurant & food deals";
+      dealSubtitle = "Check nearby restaurant coupons and specials.";
+      dealUrl = "https://www.groupon.com/local/restaurants";
+      dealSource = "category";
+    } else if (
+      cat.includes("supermarket") ||
+      cat.includes("convenience") ||
+      cat.includes("bakery") ||
+      cat.includes("butcher") ||
+      cat.includes("greengrocer") ||
+      cat.includes("grocery")
+    ) {
+      dealTitle = "Grocery deals & coupons";
+      dealSubtitle = "Find grocery discounts and digital coupons.";
+      dealUrl = "https://www.coupons.com/grocery/";
+      dealSource = "category";
+    } else if (
+      cat.includes("clothes") ||
+      cat.includes("shoes") ||
+      cat.includes("mall") ||
+      cat.includes("department")
+    ) {
+      dealTitle = "Clothing and retail deals";
+      dealSubtitle = "Browse sales and coupon codes.";
+      dealUrl = "https://www.retailmenot.com/coupons/clothing";
+      dealSource = "category";
+    } else if (cat.includes("fuel") || cat.includes("charging_station")) {
+      dealTitle = "Gas prices near you";
+      dealSubtitle = "Compare fuel prices at nearby stations.";
+      dealUrl = "https://www.gasbuddy.com/home";
+      dealSource = "category";
+    } else if (
+      cat.includes("pharmacy") ||
+      cat.includes("beauty") ||
+      cat.includes("cosmetics")
+    ) {
+      dealTitle = "Pharmacy & beauty deals";
+      dealSubtitle = "Check promotions and beauty savings.";
+      dealUrl = "https://www.retailmenot.com/view/all-health-beauty";
+      dealSource = "category";
+    }
+  }
+
+  // If still nothing, just use the place's own URL
+  if (!dealUrl && place.url) {
+    dealUrl = place.url;
+    dealTitle = place.title;
+    dealSubtitle = "View details for this location.";
+    dealSource = "place";
+  }
+
+  return {
+    ...place,
+    dealTitle,
+    dealSubtitle,
+    dealUrl,
+    dealSource
+  };
 }
 
 // -------------------- Routes --------------------
@@ -169,7 +317,6 @@ app.get("/deals/nearby", async (req, res) => {
         `;
         break;
       default:
-        // All shops + all amenities (we'll filter in JS)
         overpassFilter = `
           node(around:RADIUS,USER_LAT,USER_LON)["shop"];
           node(around:RADIUS,USER_LAT,USER_LON)["amenity"];
@@ -191,7 +338,7 @@ app.get("/deals/nearby", async (req, res) => {
     const data = await fetchOverpass(query);
     const elements = data.elements || [];
 
-    // First pass: convert raw OSM → uniform objects
+    // Base normalization
     const cleaned = elements
       .map((el) => {
         const tags = el.tags || {};
@@ -237,7 +384,7 @@ app.get("/deals/nearby", async (req, res) => {
           (amenity && GOOD_AMENITIES.has(amenity)) ||
           (shop && GOOD_SHOPS.has(shop));
 
-        return {
+        const basePlace = {
           id: String(el.id),
           storeName: name,
           title: `Visit ${name}`,
@@ -254,24 +401,22 @@ app.get("/deals/nearby", async (req, res) => {
           discountedPrice: null,
           isDealCandidate
         };
+
+        return enrichWithDeals(basePlace);
       })
       .filter(Boolean);
 
-    // Primary list: only "good" consumer places
     let deals = cleaned
       .filter((d) => d.isDealCandidate)
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
       .slice(0, 50);
 
-    // Fallback: if nothing qualifies, just show the 20 closest places (no empty array)
     if (deals.length === 0) {
       console.log("No deal candidates, falling back to nearest places.");
-      deals = cleaned
-        .sort((a, b) => a.distanceMiles - b.distanceMiles)
-        .slice(0, 20);
+      deals = cleaned.sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 20);
     }
 
-    // Optional: strip internal flag before sending to client
+    // Strip internal flag
     const response = deals.map(({ isDealCandidate, ...rest }) => rest);
 
     res.json(response);
