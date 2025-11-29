@@ -6,6 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Haversine distance in miles between two lat/lon points
 function distanceMiles(lat1, lon1, lat2, lon2) {
   const R = 3958.8; // Earth radius in miles
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -20,6 +21,7 @@ function distanceMiles(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// Simple health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
@@ -29,14 +31,17 @@ app.get("/deals/nearby", async (req, res) => {
     const { lat, lon, radius = 20, category } = req.query;
 
     if (!lat || !lon) {
-      return res.status(400).json({ error: "lat and lon are required query params" });
+      return res
+        .status(400)
+        .json({ error: "lat and lon are required query params" });
     }
 
     const userLat = parseFloat(lat);
     const userLon = parseFloat(lon);
     const radiusMiles = Number(radius) || 20;
-    const radiusMeters = Math.round(radiusMiles * 1609.34);
+    const radiusMeters = Math.round(radiusMiles * 1609.34); // Overpass uses meters
 
+    // Decide what kinds of places we want based on category
     let overpassFilter;
     switch ((category || "").toLowerCase()) {
       case "food":
@@ -52,6 +57,7 @@ app.get("/deals/nearby", async (req, res) => {
           'node(around:RADIUS,USER_LAT,USER_LON)["shop"~"supermarket|convenience"];';
         break;
       default:
+        // “All” – general shops + common amenities
         overpassFilter = `
           node(around:RADIUS,USER_LAT,USER_LON)["shop"];
           node(around:RADIUS,USER_LAT,USER_LON)["amenity"~"restaurant|fast_food|cafe|bar|pub|fuel|pharmacy|bank|atm"];
@@ -59,6 +65,7 @@ app.get("/deals/nearby", async (req, res) => {
         break;
     }
 
+    // Build Overpass query
     let query = `
       [out:json][timeout:25];
       (
@@ -72,6 +79,7 @@ app.get("/deals/nearby", async (req, res) => {
       .replace(/USER_LON/g, userLon.toString());
 
     const overpassUrl = "https://overpass-api.de/api/interpreter";
+
     const response = await axios.post(overpassUrl, query, {
       headers: { "Content-Type": "text/plain" }
     });
@@ -83,6 +91,7 @@ app.get("/deals/nearby", async (req, res) => {
 
       const name = tags.name || "Unknown place";
 
+      // Build basic address if present
       const addressParts = [];
       if (tags["addr:housenumber"]) addressParts.push(tags["addr:housenumber"]);
       if (tags["addr:street"]) addressParts.push(tags["addr:street"]);
@@ -98,22 +107,24 @@ app.get("/deals/nearby", async (req, res) => {
       const placeLat = el.lat || (el.center && el.center.lat);
       const placeLon = el.lon || (el.center && el.center.lon);
 
-      let distMiles = null;
-      if (placeLat != null && placeLon != null) {
-        distMiles = distanceMiles(userLat, userLon, placeLat, placeLon);
+      // If no coordinates, skip this element
+      if (placeLat == null || placeLon == null) {
+        return null;
       }
+
+      const distMiles = distanceMiles(userLat, userLon, placeLat, placeLon);
 
       return {
         id: el.id.toString(),
         storeName: name,
         title: `Visit ${name}`,
         description: `Local ${cat} near you.`,
-        distanceMiles: distMiles,
+        distanceMiles: distMiles, // always a number
         category: cat,
         address,
         expiryDate: null,
         promoCode: "",
-        url: null,
+        url: tags.website || null, // if OSM has a website tag
         latitude: placeLat,
         longitude: placeLon,
         originalPrice: null,
@@ -121,14 +132,18 @@ app.get("/deals/nearby", async (req, res) => {
       };
     });
 
+    // Filter out nulls & sort by distance
     const sorted = deals
-      .filter((d) => d.distanceMiles != null)
+      .filter((d) => d && typeof d.distanceMiles === "number")
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
       .slice(0, 50);
 
     res.json(sorted);
   } catch (err) {
-    console.error("Error in /deals/nearby:", err.response?.data || err.message);
+    console.error(
+      "Error in /deals/nearby:",
+      err.response?.data || err.message
+    );
     res.status(500).json({ error: "Failed to fetch nearby places" });
   }
 });
